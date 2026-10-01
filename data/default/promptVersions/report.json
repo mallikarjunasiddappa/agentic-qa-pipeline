@@ -1,0 +1,95 @@
+{
+  "generatedAt": "2026-10-01T12:03:06.107Z",
+  "agents": [
+    {
+      "agentFile": "jira-agent.md",
+      "commits": [
+        {
+          "sha": "179693805cd6d8715c1a0c68c726c706f45f1561",
+          "shortSha": "1796938",
+          "author": "Mallikarjuna Siddappa",
+          "date": "2026-10-01T14:01:35+02:00",
+          "message": "Agentic QA pipeline: Jira to Playwright with Claude Code (portfolio version)",
+          "path": ".claude/agents/jira-agent.md",
+          "insertions": 30,
+          "deletions": 0
+        }
+      ]
+    },
+    {
+      "agentFile": "planning-agent.md",
+      "commits": [
+        {
+          "sha": "179693805cd6d8715c1a0c68c726c706f45f1561",
+          "shortSha": "1796938",
+          "author": "Mallikarjuna Siddappa",
+          "date": "2026-10-01T14:01:35+02:00",
+          "message": "Agentic QA pipeline: Jira to Playwright with Claude Code (portfolio version)",
+          "path": ".claude/agents/planning-agent.md",
+          "insertions": 92,
+          "deletions": 0
+        }
+      ]
+    },
+    {
+      "agentFile": "excel-agent.md",
+      "commits": [
+        {
+          "sha": "179693805cd6d8715c1a0c68c726c706f45f1561",
+          "shortSha": "1796938",
+          "author": "Mallikarjuna Siddappa",
+          "date": "2026-10-01T14:01:35+02:00",
+          "message": "Agentic QA pipeline: Jira to Playwright with Claude Code (portfolio version)",
+          "path": ".claude/agents/excel-agent.md",
+          "insertions": 25,
+          "deletions": 0
+        }
+      ]
+    },
+    {
+      "agentFile": "tms-agent.md",
+      "commits": [
+        {
+          "sha": "179693805cd6d8715c1a0c68c726c706f45f1561",
+          "shortSha": "1796938",
+          "author": "Mallikarjuna Siddappa",
+          "date": "2026-10-01T14:01:35+02:00",
+          "message": "Agentic QA pipeline: Jira to Playwright with Claude Code (portfolio version)",
+          "path": ".claude/agents/tms-agent.md",
+          "insertions": 69,
+          "deletions": 0
+        }
+      ]
+    },
+    {
+      "agentFile": "generator-agent.md",
+      "commits": [
+        {
+          "sha": "179693805cd6d8715c1a0c68c726c706f45f1561",
+          "shortSha": "1796938",
+          "author": "Mallikarjuna Siddappa",
+          "date": "2026-10-01T14:01:35+02:00",
+          "message": "Agentic QA pipeline: Jira to Playwright with Claude Code (portfolio version)",
+          "path": ".claude/agents/generator-agent.md",
+          "insertions": 42,
+          "deletions": 0
+        }
+      ]
+    },
+    {
+      "agentFile": "healer-agent.md",
+      "commits": [
+        {
+          "sha": "179693805cd6d8715c1a0c68c726c706f45f1561",
+          "shortSha": "1796938",
+          "author": "Mallikarjuna Siddappa",
+          "date": "2026-10-01T14:01:35+02:00",
+          "message": "Agentic QA pipeline: Jira to Playwright with Claude Code (portfolio version)",
+          "path": ".claude/agents/healer-agent.md",
+          "insertions": 81,
+          "deletions": 0
+        }
+      ]
+    }
+  ]
+}
