@@ -1,0 +1,110 @@
+name: Auto-resolve manifest conflicts
+
+# When a PR falls behind master and the ONLY things that conflict are the shared traceability
+# manifest (data/**/traceability/manifest.json) and/or append-only *.jsonl telemetry logs, this
+# job merges master into the PR branch using the repo's own JSON-aware union merge driver
+# (scripts/merge-manifest.mjs) and pushes the resolved branch back - so that conflict never has
+# to be resolved by hand. Genuine conflicts in ANY other file are left untouched for a human,
+# with an explanatory PR comment.
+#
+# Why this is needed at all: GitHub cannot run custom git merge drivers on its servers, so the
+# PR page will keep SHOWING the manifest conflict until someone merges locally (where the driver
+# runs). This job is that "someone" - it does the local-style merge in CI and pushes the result.
+
+on:
+  # pull_request_target (NOT pull_request) so the workflow DEFINITION is taken from the base branch
+  # (master). A plain pull_request trigger only runs workflows that already exist in the PR's own
+  # (head) branch, so it never fires on PRs whose branch was created before this workflow landed.
+  # pull_request_target runs master's copy, covering old open PRs too. It runs with a writable token,
+  # but this job never executes the PR's code (the merge driver is fetched from master, and no PR
+  # scripts run), and fork PRs are skipped by the job `if`, so the token is not exposed to untrusted code.
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+# Elevated so the job can push the resolved merge to the PR branch and comment on the PR.
+# (Requires repo Settings -> Actions -> Workflow permissions = "Read and write".)
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  # One resolve per PR; a newer push cancels an in-flight run for the same PR.
+  group: auto-resolve-manifest-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  resolve:
+    # Same-repo PRs only: GITHUB_TOKEN cannot push to a fork's branch, so fork PRs are skipped.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the PR branch (full history)
+        uses: actions/checkout@v5
+        with:
+          ref: ${{ github.head_ref }}
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Resolve manifest/telemetry conflicts (if any) and push
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_REF: ${{ github.head_ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git fetch --no-tags origin master
+
+          # 1) Branch already contains the latest master -> nothing to do.
+          if git merge-base --is-ancestor origin/master HEAD; then
+            echo "PR branch already contains the latest master - nothing to resolve."
+            exit 0
+          fi
+
+          # 2) Would a plain merge even conflict? merge-tree ignores custom drivers, so it sees
+          #    exactly what GitHub sees. Clean here => GitHub can merge the PR itself; leave it alone.
+          if git merge-tree --write-tree origin/master HEAD >/dev/null 2>&1; then
+            echo "master is ahead but there is no merge conflict - leaving the PR untouched."
+            exit 0
+          fi
+
+          echo "Conflict detected - registering the union merge driver from master and merging in."
+
+          # The PR branch may PREDATE the merge driver (older branches have no scripts/merge-manifest.mjs
+          # and no setup:git script), so fetch the driver from master into a temp path OUTSIDE the work
+          # tree and point git at it. 'merge=union' is a git built-in and needs no script.
+          git show origin/master:scripts/merge-manifest.mjs > "$RUNNER_TEMP/merge-manifest.mjs"
+          git config merge.manifest-merge.driver "node '$RUNNER_TEMP/merge-manifest.mjs' %O %A %B %P"
+          # Force the attributes on regardless of the branch's own (possibly older) .gitattributes.
+          {
+            echo 'data/**/traceability/manifest.json merge=manifest-merge'
+            echo 'data/**/*.jsonl merge=union'
+          } >> "$(git rev-parse --git-dir)/info/attributes"
+
+          # 3) Real merge. The driver auto-unions manifest.json / *.jsonl during this step.
+          if git merge --no-edit origin/master; then
+            # Safety net: manifest must be valid JSON, and no conflict markers may survive anywhere.
+            node -e "JSON.parse(require('fs').readFileSync('data/default/traceability/manifest.json','utf8'))"
+            if git grep -nI -e '^<<<<<<< ' -e '^=======$' -e '^>>>>>>> ' -- 'data/**/traceability/manifest.json' 'data/**/*.jsonl'; then
+              echo "Conflict markers survived the merge - refusing to push."
+              exit 1
+            fi
+            git push origin "HEAD:${HEAD_REF}"
+            gh pr comment "$PR_NUMBER" --body "🤖 Auto-resolved the traceability manifest / telemetry conflict by merging \`master\` in with the repo's JSON union merge driver, and pushed the update. No manual action needed."
+            echo "Resolved and pushed."
+          else
+            # Driver handled manifest/jsonl, but other files have genuine conflicts a human must resolve.
+            OTHER="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+            git merge --abort
+            gh pr comment "$PR_NUMBER" --body "🤖 The traceability manifest resolves automatically, but this PR also has conflicts that need a human in: \`${OTHER}\`. Please merge \`master\` locally, resolve those files, and push. (The manifest itself is handled by the repo's union merge driver once you merge locally.)"
+            echo "Non-manifest conflicts need manual resolution: ${OTHER}"
+            exit 1
+          fi

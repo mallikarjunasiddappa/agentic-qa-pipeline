@@ -1,0 +1,87 @@
+name: Locator Priority Check
+
+# No `paths:` filter, deliberately - same reasoning as assertion-integrity.yml: a required status
+# check that's path-filtered never reports a status on PRs that don't touch those paths, and
+# branch protection then blocks those PRs forever. The job always runs instead; checkLocatorPriority
+# re-scans the whole tree every time regardless (it's not diff-based), so this costs nothing extra.
+on:
+  pull_request: {}
+
+# Needed to post/update the human-readable PR comment below - default GITHUB_TOKEN permissions
+# for pull_request-triggered workflows are read-only unless granted explicitly.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  locator-priority:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        # Default shallow checkout is enough - this is a static scan of the working tree, not a
+        # diff against a base SHA, so unlike assertion-integrity.yml it needs no git history at all.
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `set +e` + capturing $? explicitly, rather than letting this step fail outright, so the
+      # "Comment on PR" step below still runs even when the check fails - actual job failure is
+      # deferred to the last step, after the human-readable comment has been posted.
+      - name: Run locator priority check
+        id: check
+        run: |
+          set +e
+          npx tsx src/pipeline/orchestrator/pipeline.ts --stage locator-check > locator-priority-report.md
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+          cat locator-priority-report.md
+
+      # Posts (or updates, on re-push) a single comment identified by a hidden marker so repeated
+      # pushes update the same comment instead of piling up new ones. Only creates a brand-new
+      # comment on an actual failure - a PR that's always been green never gets one, to avoid
+      # noise; a PR that failed once and is now fixed gets its existing comment updated to show
+      # that, rather than left stale and confusing.
+      - name: Comment on PR
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('locator-priority-report.md', 'utf-8').trim();
+            const passed = '${{ steps.check.outputs.exit_code }}' === '0';
+            const marker = '<!-- pipeline-guardrail:locator-priority -->';
+            const header = passed
+              ? '### :white_check_mark: Locator Priority Check — passing'
+              : '### :x: Locator Priority Check — blocking this PR';
+            const body = `${marker}\n${header}\n\n${report}\n\n---\n<sub>This comment updates automatically on each push.</sub>`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find((c) => c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else if (!passed) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if locator priority check failed
+        if: steps.check.outputs.exit_code != '0'
+        run: exit 1

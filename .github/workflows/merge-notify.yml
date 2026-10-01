@@ -1,0 +1,40 @@
+name: Merge Notify
+
+# Simple merge-ping: a generic "PR merged" heads-up, distinct from the two other Slack surfaces
+# in this repo. Not the daily Pipeline Health Report (pipeline-report.yml, scheduled, aggregate
+# metrics across every ticket) and not the on-demand full ticket summary (`npm run pipeline --
+# stage ticket-summary --issue KEY`, manual, DMs the requester via Slack's Bot API - see
+# src/pipeline/ticketSummary/). This workflow only fires automatically, only on a real merge, and
+# only posts one line to a channel - no per-ticket detail, by design (see README's Slack
+# Notifications section for why: a merged PR isn't the same moment as "this ticket's pipeline is
+# done", so anything richer belongs in the manual ticket-summary command instead).
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  merge-notify:
+    # pull_request fires for closes too, not just merges - GitHub's own recommended guard for
+    # "only when actually merged" (a closed-without-merging PR should stay silent).
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post merge notification to Slack
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.MERGE_NOTIFY_SLACK_WEBHOOK_URL }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PR_BASE: ${{ github.event.pull_request.base.ref }}
+        run: |
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "MERGE_NOTIFY_SLACK_WEBHOOK_URL not set - skipping Slack notification."
+            exit 0
+          fi
+          # jq builds the JSON payload so PR titles containing quotes/newlines/emoji can't break
+          # the request - the same failure mode a hand-rolled printf/here-string would risk.
+          payload=$(jq -n \
+            --arg text "*PR #${PR_NUMBER} merged into ${PR_BASE}:* <${PR_URL}|${PR_TITLE}> (by ${PR_AUTHOR})" \
+            '{text: $text}')
+          curl -sf -X POST -H 'Content-type: application/json' --data "$payload" "$SLACK_WEBHOOK_URL"

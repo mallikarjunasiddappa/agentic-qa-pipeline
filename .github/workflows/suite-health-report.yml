@@ -1,0 +1,40 @@
+name: Suite Health Report
+
+# Mirrors healing-report.yml / flaky-report.yml, with one difference: the suite-health stage reads
+# the test management provider (Qase) live for case titles + run history, so it needs the same
+# QASE_* secrets the pipeline uses elsewhere. Manual-dispatch + weekly, and it does NOT commit -
+# it only uploads the report as an artifact, same as healing-report.yml.
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  suite-health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run suite health report
+        env:
+          QASE_API_TOKEN: ${{ secrets.QASE_API_TOKEN }}
+          QASE_PROJECT_CODE: ${{ secrets.QASE_PROJECT_CODE }}
+          TMS_PROVIDER: qase
+        run: npm run suite-health:report
+
+      - name: Upload suite health report
+        uses: actions/upload-artifact@v6
+        with:
+          name: suite-health-report
+          # data/default/ - no --tenant/TENANT_ID passed, so resolveTenantId() falls back to
+          # 'default' (tenantContext.ts), same as every other report workflow here.
+          path: data/default/suiteHealth/report.md

@@ -1,0 +1,40 @@
+name: Healing Telemetry Report
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch: {}
+
+jobs:
+  healing-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run healing report
+        run: npm run healing:report
+
+      - name: Upload healing report
+        uses: actions/upload-artifact@v6
+        with:
+          name: healing-report
+          # data/default/, not repo-root healing/ - this job runs npm run healing:report with no
+          # --tenant/TENANT_ID, so resolveTenantId() falls back to 'default' (tenantContext.ts),
+          # same as every other CI guardrail here that omits --tenant. REPORT_MD_PATH()
+          # (telemetry/healingReport.ts) writes through tenantDataPath(), which has written here
+          # since the Phase -1 tenant migration (commit 282a952) moved output out of the
+          # repo-root healing/ this step used to reference. Unlike cost-report.yml/
+          # drift-check.yml/pipeline-report.yml, this workflow has no commit step, so the stale
+          # path didn't fail the job outright - it just meant upload-artifact's default
+          # if-no-files-found: warn silently produced an empty artifact on every run since that
+          # migration, with no visible error.
+          path: data/default/healing/report.md

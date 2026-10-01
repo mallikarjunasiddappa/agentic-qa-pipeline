@@ -1,0 +1,44 @@
+
+# Playwright
+node_modules/
+/test-results/
+/playwright-report/
+/blob-report/
+/playwright/.cache/
+/playwright/.auth/
+allure-results/
+allure-report/
+
+
+.env
+data/*/cost/raw/*.log
+
+# One-time backfill snapshots (see scripts/backfillTestTitles.ts) - safety copies for a local
+# --apply run, never meant to be committed; git history already has the pre-migration version.
+*.bak-*
+
+# playwright-cli skill's own debug output (console logs + accessibility-tree page snapshots from
+# every --debug=cli session) and stray page-snapshot files it writes at the repo root during
+# generation/healing - scratch, regenerated every session, never meant to be committed.
+.playwright-cli/
+login-filled.yml
+
+# Excel's own lock/temp file, created automatically while a workbook under output/ is open -
+# never a real artifact, never meant to be committed.
+data/*/output/~$*.xlsx
+
+# Word's equivalent lock/temp file, created automatically while a .docx under docs/planning/ is
+# open for editing - same reasoning as data/*/output/~$*.xlsx above.
+docs/planning/~$*.docx
+
+# Editor settings - personal, not project config.
+.vscode/
+
+# Planning/strategy docs (decisions log, Scrum Master plans, roadmap drafts, etc.) - reference
+# material for whoever's working in this repo, not part of the shipped codebase. Kept out of git
+# so it doesn't clutter `git status`/PR diffs; still readable locally and by Claude in this
+# project's connected folder.
+docs/planning/
+
+# local .env backups (may contain real tokens) - never commit
+.env.bak*

@@ -1,0 +1,61 @@
+name: Prompt Version Report
+
+on:
+  push:
+    paths:
+      - '.claude/agents/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  prompt-versions-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          # git log --follow against a shallow clone sees almost nothing - full history is
+          # required for it to walk past the qase-agent.md -> tms-agent.md rename (and any future
+          # renames). Do not remove this.
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run prompt version report
+        run: npm run prompt-versions:report
+
+      - name: Upload prompt version report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: prompt-versions-report
+          # data/default/, not repo-root promptVersions/ - this job runs npm run
+          # prompt-versions:report with no --tenant/TENANT_ID, so resolveTenantId() falls back to
+          # 'default' (tenantContext.ts), same as every other CI guardrail in this repo that omits
+          # --tenant. REPORT_MD_PATH() (report.ts) writes through tenantDataPath(), which has
+          # written here since the Phase -1 tenant migration (commit 282a952) moved output out of
+          # the repo-root promptVersions/ this step used to reference - that root path has not
+          # existed since, which is what was failing this job.
+          path: data/default/promptVersions/report.md
+
+      - name: Commit updated report
+        if: always()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/default/promptVersions/report.json data/default/promptVersions/report.md
+          if git diff --cached --quiet; then
+            echo "No report changes to commit"
+          else
+            git commit -m "chore: update prompt version report [skip ci]"
+            # actions/checkout leaves HEAD detached, so push explicitly to the triggering branch.
+            git push origin HEAD:${{ github.ref_name }}
+          fi

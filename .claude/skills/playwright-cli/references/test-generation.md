@@ -1,0 +1,539 @@
+# Test generation (plan → generate → heal)
+
+End-to-end workflow for authoring and maintaining Playwright tests with `playwright-cli`. Every `playwright-cli` action emits the equivalent Playwright TypeScript, and that generated code is the raw material for every test. The sections below can be used independently:
+
+- **How generation works** — the core mechanic everything else relies on: actions become TypeScript, plus how to add assertions.
+- **Plan** — explore the app, produce a spec file describing what to test.
+- **Generate** — turn a spec into Playwright test files. Update the spec if it's vague or stale.
+- **Heal** — diagnose failing tests, fix the code, reconcile the spec with reality.
+
+Plan / generate / heal lean on the same mechanic: run `npx playwright test --debug=cli` in the background, then `playwright-cli attach tw-XXXX` to drive the paused page interactively. See [playwright-tests.md](playwright-tests.md) for the debug/attach mechanics.
+
+---
+
+## 0. How generation works
+
+Every action you perform with `playwright-cli` generates corresponding Playwright TypeScript code. This code appears in the output and can be copied directly into your test files.
+
+```bash
+# Start a session
+playwright-cli open https://example.com/login
+
+# Take a snapshot to see elements
+playwright-cli snapshot
+# Output shows: e1 [textbox "Email"], e2 [textbox "Password"], e3 [button "Sign In"]
+
+# Fill form fields - generates code automatically
+playwright-cli fill e1 "user@example.com"
+# Ran Playwright code:
+# await page.getByRole('textbox', { name: 'Email' }).fill('user@example.com');
+
+playwright-cli fill e2 "password123"
+# Ran Playwright code:
+# await page.getByRole('textbox', { name: 'Password' }).fill('password123');
+
+playwright-cli click e3
+# Ran Playwright code:
+# await page.getByRole('button', { name: 'Sign In' }).click();
+```
+
+### Building a test file
+
+Collect the generated code into a Playwright test:
+
+```typescript
+import { test, expect } from '@playwright/test';
+
+test('login flow', async ({ page }) => {
+  // Generated code from playwright-cli session:
+  await page.goto('https://example.com/login');
+  await page.getByRole('textbox', { name: 'Email' }).fill('user@example.com');
+  await page.getByRole('textbox', { name: 'Password' }).fill('password123');
+  await page.getByRole('button', { name: 'Sign In' }).click();
+
+  // Add assertions
+  await expect(page).toHaveURL(/.*dashboard/);
+});
+```
+
+### Use semantic locators
+
+The generated code uses role-based locators when possible, which are more resilient:
+
+```typescript
+// Generated (good - semantic)
+await page.getByRole('button', { name: 'Submit' }).click();
+
+// Avoid (fragile - CSS selectors)
+await page.locator('#submit-btn').click();
+```
+
+### Explore before recording
+
+Take snapshots to understand the page structure before recording actions:
+
+```bash
+playwright-cli open https://example.com
+playwright-cli snapshot
+# Review the element structure
+playwright-cli click e5
+```
+
+### Add assertions manually
+
+Generated code captures actions but not assertions. Add expectations in your test using one of the recommended matchers:
+
+- `toBeVisible()` — element is rendered and visible
+- `toHaveText(text)` — element text content matches
+- `toHaveValue(value) / toBeEmpty()` — input/select value matches
+- `toBeChecked() / toBeUnchecked()` — checkbox state matches
+- `toMatchAriaSnapshot(snapshot)` — page (or locator) matches a partial accessibility snapshot
+
+Use `playwright-cli generate-locator <target>` to produce the locator expression for the assertion, and the snapshot/eval commands to capture the expected value.
+
+When asserting text content, make sure that generated locator does not contain text from the element itself. `getByTestId()` or `getByLabel()` usually work well with asserting text. When locator is text-based, prefer `toBeVisible()` instead.
+
+Snapshot to be matched does not have to contain all the information - only capture what's necessary for the assertion. You can use regular expressions for unstable values.
+
+```bash
+# Get a stable locator for an element ref to use in the assertion
+playwright-cli --raw generate-locator e5
+# getByRole('button', { name: 'Submit' })
+
+# Capture expected text content for toHaveText
+playwright-cli --raw eval "el => el.textContent" e5
+
+# Capture expected input value for toHaveValue/toBeEmpty
+playwright-cli --raw eval "el => el.value" e5
+
+# Capture expected aria snapshot for toMatchAriaSnapshot/toBeChecked
+# (whole page, or use a ref to scope to a region)
+playwright-cli --raw snapshot
+playwright-cli --raw snapshot e5
+```
+
+```typescript
+// Generated action
+await page.getByRole('button', { name: 'Submit' }).click();
+
+// Manual assertions using the outputs above:
+await expect(page.getByRole('alert', { name: 'Success' })).toBeVisible();
+await expect(page.getByTestId('main-header')).toHaveText('Welcome, user');
+await expect(page.getByRole('textbox', { name: 'Email' })).toHaveValue('user@example.com');
+await expect(page.getByRole('checkbox', { name: 'Enable notifications' })).toBeChecked();
+
+// toMatchAriaSnapshot on the whole page, finds a matching region
+await expect(page).toMatchAriaSnapshot(`
+  - heading "Welcome, user"
+  - link /\\d+ new messages?/
+  - button "Sign out"
+`);
+
+// toMatchAriaSnapshot scoped to a region
+await expect(page.getByRole('navigation')).toMatchAriaSnapshot(`
+  - link "Home"
+  - link /\\d+ new messages?/
+  - link "Profile"
+`);
+```
+
+---
+
+## 1. Planning
+
+Goal: produce a spec file (e.g. `specs/<feature>.plan.md`) that enumerates the scenarios to test. **Always** write the spec to a file.
+
+### 1.1 Prerequisite: workspace
+
+Check the workspace has Playwright installed before anything else:
+
+```bash
+# Either of these confirms a workspace:
+test -f playwright.config.ts || test -f playwright.config.js
+npx --no-install playwright --version
+```
+
+If there is no Playwright install, bootstrap one and let the user pick the defaults:
+
+```bash
+npm init playwright@latest
+```
+
+### 1.2 Prerequisite: seed test
+
+A **seed test** is a minimal test that lands the page in the state every scenario starts from: navigation to the app, any required login, feature flags, etc. Scenarios assume a fresh start *after* the seed. `--debug=cli` pauses *inside* this test, so the seed is where every planning and generation session begins.
+
+Minimum viable seed:
+
+```ts
+// tests/seed.spec.ts
+// traceability-coverage: approved — seed test, not a scenario; no Jira/TMS case to link against.
+import { test } from '@playwright/test';
+
+test('seed', async ({ page }) => {
+  await page.goto('https://example.com/');
+});
+```
+
+Preferred — push navigation into a fixture so scenario tests reuse it:
+
+```ts
+// tests/fixtures.ts
+import { test as baseTest } from '@playwright/test';
+export { expect } from '@playwright/test';
+
+export const test = baseTest.extend({
+  page: async ({ page }, use) => {
+    await page.goto('https://example.com/');
+    await use(page);
+  },
+});
+```
+
+```ts
+// tests/seed.spec.ts
+// traceability-coverage: approved — seed test, not a scenario; no Jira/TMS case to link against.
+import { test } from './fixtures';
+
+test('seed', async ({ page }) => {
+  // Fixture already navigates. This empty body tells agents where to start.
+});
+```
+
+If no seed exists, create one that at least navigates to the app.
+
+### 1.3 Explore the app
+
+Launch the app via the seed in the background and attach:
+
+```bash
+PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/seed.spec.ts --debug=cli
+# wait for "Debugging Instructions" and the session name tw-XXXX
+playwright-cli attach tw-XXXX
+```
+
+Resume so the seed runs, then probe the app:
+
+```bash
+playwright-cli resume                   # resume so that seed test runs fully
+playwright-cli snapshot                 # inventory of interactive elements
+playwright-cli click e5                 # follow a flow
+playwright-cli eval "location.href"     # read URL / state
+playwright-cli show --annotate          # ask the user to point at something
+```
+
+Map out:
+
+- Interactive surfaces (forms, buttons, lists, filters, modals).
+- Primary user journeys end-to-end.
+- Edge cases: empty states, validation errors, very long input, boundary values.
+- Persistence: reload, local/session storage, URL fragments.
+- Navigation: which controls change the URL, back/forward behaviour.
+
+**Important**: Do not just open the app url with playwright-cli, always go through the test to capture any custom setup done there.
+**Important**: Stop the background test when done exploring.
+
+### 1.4 Write the spec file
+
+Save under `specs/<feature>.plan.md`. Use this structure:
+
+```markdown
+# <Feature> Test Plan
+
+## Application Overview
+
+<One paragraph describing what the feature does and why it matters.>
+
+## Test Scenarios
+
+**Seed:** `tests/seed.spec.ts`
+
+**File:** `tests/<feature>/<feature-name>.spec.ts` (shared by every scenario across every group in this plan by default - see the grouping guideline below)
+
+### 1. <Group Name>
+
+**Seed:** <Optional - only if this group needs a different seed than the plan's default above.>
+
+**File:** <Optional - only if this group needs its own separate file instead of the plan's shared File: above, e.g. a materially different seed/fixture, or the shared file has grown large enough that splitting improves readability. State why.>
+
+**Priority:** <low|medium|high|critical - baseline priority for this group's scenarios>
+
+#### 1.1. <kebab-case-scenario-name>
+
+**Precondition:** <One sentence stating this scenario's concrete, testable starting state - which account/role, what data must already exist. Not the seed file path; a human tester reading this should not have to open a file to know what's already true when the scenario begins.>
+
+**Priority:** <Optional - only if this one scenario's risk differs from the group's baseline Priority above, e.g. a single critical edge case inside an otherwise medium-priority group.>
+
+**File:** <Optional - only if this one scenario needs its own separate file instead of the plan's (or its group's) shared File: above, e.g. it needs a materially different seed/fixture, or the shared file has grown large enough that splitting improves readability. State why.>
+
+**Steps:**
+  1. <Concrete user step>
+    - expect: <observable outcome>
+    - expect: <another observable outcome>
+  2. <Next step>
+    - expect: <outcome>
+
+#### 1.2. <next-scenario>
+...
+
+### 2. <Next Group>
+
+**Seed:** `tests/seed.spec.ts`
+...
+```
+
+Guidelines:
+
+- Each scenario is independent and starts from the seed's fresh state — never chain scenarios.
+- Scenario names are kebab-case and match the test file name (`should-add-single-todo` → `should-add-single-todo.spec.ts`).
+- Cover happy path, edge cases, validation, negative flows, persistence.
+- Write steps at the user level ("Type 'Buy milk' into the input"), not the API level ("call `fill`").
+- Put observable outcomes in `- expect:` bullets; each becomes an assertion during generation.
+- Write a real, scenario-specific `**Precondition:**` line for every scenario - not the seed file path (that's already captured separately via the group's `**Seed:**` line, and stays out of tester-facing text), and not the same sentence copy-pasted across every scenario in the group. State what's specifically true for *this* scenario before it starts (e.g. "Student has an active Pro subscription expiring in 3 days" vs. "Student has a cancelled subscription with no active plan"). If two scenarios in a group would otherwise share an identical precondition, that's a signal they're not actually testing different starting states - reconsider whether one of them is redundant.
+- Write a `**Priority:**` line (`low`/`medium`/`high`/`critical`) for every group, reflecting real assessed risk - not the same value defaulted across every group in the spec. Add a scenario-level `**Priority:**` override only when one scenario's risk genuinely differs from its group's baseline.
+- **Default: one shared file per plan (ticket), not per group or per scenario.** Every scenario across every `### <Group Name>` section in this plan uses the plan-level **File:** line (set right under `## Test Scenarios`, before the first group), generated together as multiple `test()` blocks - one `test.describe` per group, all as sibling blocks in the one shared file. See 2.2 for the multi-group example and the `// scenario-id:` marker this requires on each scenario. Give a *group* its own separate **File:** line only when it doesn't belong in the plan's shared file for a real reason (different seed/fixture, or the shared file has grown too large) - state why when you do; give a single *scenario* its own separate **File:** line for the same reasons at an even finer grain. A ticket's scenarios are one feature by default - splitting them across files is the exception, not the default shape.
+
+---
+
+## 2. Generate
+
+Goal: take a spec file and produce Playwright test files. Optionally update the spec if it has drifted.
+
+### 2.1 Inputs
+
+- **Spec file**, e.g. `specs/basic-operations.plan.md`.
+- **Target**: either a single scenario (e.g. `1.2`), a whole group (`1`), or all.
+- **Seed file**, read from the scenario's group `**Seed:**` line, or the plan's top-level `**Seed:**` line if the group doesn't override it.
+
+### 2.2 Generate one scenario
+
+Each scenario gets its own fresh `--debug=cli` background run from the seed, with its own
+`tw-XXXX` session name (see [How generation works](#0-how-generation-works)) - scenarios do not
+share a session. Within **one** agent, generate one scenario at a time (an agent can only drive one
+attached `playwright-cli` session at a time, one command per turn) - the sequencing below is a
+consequence of that, not a technical requirement to never overlap two scenarios' generation at all.
+See 2.3 for generating several scenarios faster by dispatching more than one agent.
+
+```bash
+PLAYWRIGHT_HTML_OPEN=never npx playwright test <seed-file> --debug=cli   # background
+playwright-cli attach tw-XXXX
+# resume
+```
+
+**Do not** just open the app url with playwright-cli, always go through the test to capture any custom setup done there.
+
+Walk the scenario's `Steps:` one by one with `playwright-cli`, treating the spec as the plan and the live app as the source of truth. If a step is vague ("click the button" — which button?), references an element that no longer exists, or contradicts the app's actual behaviour, use your judgement: update the spec to match what the app really does, then keep going. Editing the spec mid-generation is expected.
+
+Every action prints the equivalent Playwright TypeScript (see [How generation works](#0-how-generation-works)):
+
+```bash
+playwright-cli snapshot                         # find refs
+playwright-cli fill e3 "John Doe"               # -> page.getByRole('textbox', {...}).fill(...)
+playwright-cli press Enter
+playwright-cli click e7
+```
+
+For each `- expect:` bullet, add an explicit assertion. See [How generation works](#0-how-generation-works) for details.
+
+Collect the generated code and write the test file at the path given in the spec's **File:** line - the plan-level one by default, or the scenario's group's own **File:** line if that group overrides it, or the scenario's own **File:** line if that overrides further.
+
+**The default: this scenario shares its plan's File: path.** Add this scenario's `test(...)` into that file's `test.describe` for its own group (create the group's `test.describe` as a new sibling block the first time one of that group's scenarios lands in the file; create the file itself on the plan's very first scenario), and mark it with a `// scenario-id: <kebab-case-scenario-name>` comment directly above the `test(...)`, using the exact heading text from the spec (`#### 1.2. should-reopen-profile-after-navigating-away` → `should-reopen-profile-after-navigating-away`). This marker is how generation, traceability, healing, and flaky-quarantine all tell scenarios in a shared file apart (see `src/pipeline/shared/testBlocks.ts`) - a test with no marker in a multi-test file can't be traced back to its scenario, and will be skipped rather than guessed at. When the plan has more than one group, each group keeps its own `test.describe` (named verbatim from its group heading) as a sibling block inside the one shared file - see the single-group example just below, then the multi-group example right after it:
+
+```ts
+// spec: specs/student-profile.plan.md
+// seed: tests/seed.profile.spec.ts
+import { test, expect } from '../../fixtures/profile';
+
+test.describe('Student Profile', () => {
+  // scenario-id: should-open-my-profile-from-account-menu
+  test('should open my profile from account menu', async ({ page }) => {
+    // 1. Click the account menu
+    await page.getByRole('button', { name: 'Account' }).click();
+    // 2. Click "My Profile"
+    await page.getByRole('menuitem', { name: 'My Profile' }).click();
+
+    await expect(page).toHaveURL(/\/profile/);
+  });
+
+  // scenario-id: should-reopen-profile-after-navigating-away
+  test('should reopen profile after navigating away', async ({ page }) => {
+    // 1. Navigate away to the dashboard
+    await page.getByRole('link', { name: 'Dashboard' }).click();
+    // 2. Reopen the profile via the account menu
+    await page.getByRole('button', { name: 'Account' }).click();
+    await page.getByRole('menuitem', { name: 'My Profile' }).click();
+
+    await expect(page).toHaveURL(/\/profile/);
+  });
+});
+```
+
+**Multiple groups in one plan still share this same file** - the plan's top-level **File:** line
+covers every group, not just one. Each group keeps its own `test.describe`, named verbatim from its
+group heading, as a sibling block in the file (this is the actual shape a real ticket with three
+groups - "Personal Info", "Save Flow", "Reload Check" - shipped with):
+
+```ts
+// spec: specs/student-personal-details.plan.md
+// seed: tests/ui/seed.profile.spec.ts
+import { test, expect } from '../../../src/ui/fixtures/profile';
+import { ProfilePage } from '../../../src/ui/pages/ProfilePage';
+
+test.describe('Personal Info', () => {
+  // scenario-id: should-show-existing-personal-detail-values-on-profile-page
+  test('should show existing personal detail values on profile page', async ({ page }) => {
+    // ...
+  });
+});
+
+test.describe('Save Flow', () => {
+  // scenario-id: should-update-and-save-all-personal-detail-fields
+  test('should update and save all personal detail fields', async ({ page }) => {
+    // ...
+  });
+});
+
+test.describe('Reload Check', () => {
+  // scenario-id: should-persist-values-after-profile-page-reopened
+  test('should persist values after profile page reopened', async ({ page }) => {
+    // ...
+  });
+});
+```
+
+**If this scenario (or its group) has its own separate File: line** (see 1.4 - only when it genuinely doesn't fit the plan's shared file), write one file with one test - the `// scenario-id:` marker isn't required since `resolveTestBlock` only needs it when a file holds more than one test:
+
+```ts
+// spec: specs/basic-operations.plan.md
+// seed: tests/seed.spec.ts
+import { test, expect } from './fixtures';   // or '@playwright/test' if no fixtures file
+
+test.describe('Signing in and out', () => {
+  test('should sign in', async ({ page }) => {
+    // 1. Navigate to the application
+    // (handled by the seed fixture)
+
+    // 2. Type 'John Doe' into the username field
+    await page.getByRole('textbox', { name: 'username' }).fill('John Doe');
+
+    // 3. Type password
+    await page.getByRole('textbox', { name: 'password' }).fill('TestPassword');
+
+    // 4. Press Enter to submit
+    await page.getByRole('textbox', { name: 'password' }).press('Enter');
+
+    await expect(page.getByRole('heading')).toContainText('Welcome, John Doe!');
+  });
+});
+```
+
+Rules:
+
+- File path, describe name, and test name come verbatim from the spec (minus the ordinal).
+- One shared file per plan (ticket) is the default, spanning every group. Every scenario needs a `// scenario-id: <kebab-case-scenario-name>` comment directly above its `test(...)` - see above - since `resolveTestBlock` needs it whenever a file holds more than one test. Getting this wrong (missing or mismatched) means that scenario's traceability entry is skipped, not silently mismatched to the wrong test - fix the marker and re-run `--stage traceability-record` rather than working around it.
+- When a plan has more than one group, each group gets its own `test.describe` (named verbatim from its group heading) as a sibling block inside the one shared file - see the multi-group example above. Do not merge two groups' scenarios into one `test.describe`; the group boundary is still real, only the file boundary is gone.
+- Give a group, or a single scenario, its own separate File: line only when it genuinely doesn't belong in the plan's shared file (see 1.4). A standalone file needs no marker.
+- Prefix each numbered step with a `// N. <step text>` comment before its actions.
+- Use the describe group name verbatim from the spec (no `1.` ordinal).
+- Import from `./fixtures` if the project has one; otherwise `@playwright/test`.
+- **Important**: close the CLI session and stop the background test before moving to the next scenario.
+
+### 2.3 Generate multiple scenarios
+
+Within a single agent, loop 2.2 over the targeted scenarios one at a time, restarting the seed
+between each so every test starts from a clean page.
+
+**Generating faster with more than one scenario targeted:** each scenario's `--debug=cli` session
+is already independent (its own browser, its own `tw-XXXX` name - see 2.2), so nothing about the
+generation mechanism itself forces the whole batch through one agent serially. Dispatching several
+agents at once, each running 2.2 for a different scenario, is safe and is the main lever for
+cutting wall-clock time on a multi-scenario ticket - the per-scenario seed-restart cost (login,
+navigation) is real and shouldn't be cut, but it overlaps instead of stacking once more than one
+agent is doing it at the same time. Keep concurrency to a sane number for the machine actually
+running the browsers (each session is a real browser instance) rather than dispatching the entire
+batch at once. Every dispatched agent still needs its own cost-marker bracketing (see
+`planning-agent.md`) and must fully close its CLI session and stop its background test before
+finishing, same as the sequential case.
+
+When several scenarios in a row share one **File:** path (now the common case across an entire plan, not just within one group), each pass still gets its own seed-restart and CLI session (nothing about generation itself changes) - only the write step differs: append the new scenario's marked `test(...)` into that file's `test.describe` for its own group (adding a new sibling `test.describe` the first time one of that group's scenarios lands in the file) instead of overwriting the file, so earlier scenarios already generated into it survive.
+
+### 2.4 Run generated tests
+
+After generation, run the new tests once:
+
+```bash
+PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/<group>/<scenario>.spec.ts
+```
+
+Any failure goes to Section 3.
+
+---
+
+## 3. Heal
+
+Goal: fix failing tests, and update the spec if the app's intended behaviour changed.
+
+### 3.1 Find failing tests
+
+```bash
+PLAYWRIGHT_HTML_OPEN=never npx playwright test
+```
+
+Record the list of failing `<file>:<line>` entries and process them one at a time. Do not attempt parallel fixes — shared state and the single CLI session make that fragile.
+
+### 3.2 Debug one failure
+
+Run the single failing test in debug mode in the background, then attach:
+
+```bash
+PLAYWRIGHT_HTML_OPEN=never npx playwright test tests/<group>/<scenario>.spec.ts:<line> --debug=cli
+# wait for "Debugging Instructions" and the tw-XXXX session name
+playwright-cli attach tw-XXXX
+```
+
+The test is paused at the start. Step forward or run to until just before the failing action or assertion, then diagnose:
+
+```bash
+playwright-cli snapshot                # did the element change / move / rename?
+playwright-cli console                 # app-side errors?
+playwright-cli requests                # failed request? wrong payload?
+playwright-cli show --annotate         # ask the user to point somewhere
+```
+
+Common causes: selector drift, new wrapper element, label/ARIA rename, timing (transition, async load), assertion text updated in the app, test data leaking between runs.
+
+Rehearse the corrected interaction with `playwright-cli` — the generated code in the output is what you paste back into the test.
+
+### 3.3 Apply the fix
+
+Edit the test file: update the locator, assertion, step order, or inputs to match the corrected behaviour. Stop the background debug run. Rerun the single test to confirm green.
+
+Never skip hooks or add sleeps as a fix. Never use `networkidle`.
+
+### 3.4 Reconcile with the spec
+
+Open the spec referenced by the `// spec:` header in the test file and locate the scenario that matches the test.
+
+- **Fix was purely technical** (locator drift, better assertion shape) and the spec's user-level behaviour still matches the app → leave the spec alone.
+- **Fix changed user-visible steps, inputs, order, or expected outcomes** that the spec describes → update the spec to match reality. Keep the scenario id and file path stable; only the step / expect lines change.
+- **Unclear whether the app change is intentional** (spec is stale) **or a regression** (test was right, app is wrong) → **stop and ask the user**. Provide:
+  - the scenario id (e.g. `2.3`),
+  - the spec lines that no longer match,
+  - the observed app behaviour (quote a snapshot excerpt or a concrete outcome).
+
+Only after the user answers, either update the spec (intentional change) or file/flag the test as covering a bug (regression).
+
+### 3.5 Iteration and giving up
+
+- Fix failures one at a time; rerun after each.
+- If after thorough investigation you are confident the test is correct but the app is wrong *and* the user has confirmed it's a bug: mark the test `test.fixme(...)` with a comment pointing at the user's decision or issue link. Never silently skip.
+
+---
+
+## Cross-references
+
+| For... | See |
+|---|---|
+| `--debug=cli` / attach mechanics | [playwright-tests.md](playwright-tests.md) |
+| Mocking requests during exploration/generation | [request-mocking.md](request-mocking.md) |
+| Managing the CLI browser session | [session-management.md](session-management.md) |

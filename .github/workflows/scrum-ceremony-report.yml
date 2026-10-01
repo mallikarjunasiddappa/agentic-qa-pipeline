@@ -1,0 +1,117 @@
+name: Scrum Ceremony Reports
+
+on:
+  schedule:
+    # Weekday mornings only - these three stages (dev-status/sprint-status/standup-digest) are all
+    # "what does the team need to know for today's standup" reports, so a weekend run would just
+    # be stale noise nobody reads until Monday anyway. 6am UTC to match drift-check.yml's existing
+    # daily cadence; adjust the hour to whatever actually lands before your team's real standup
+    # time in your timezone - this value is a placeholder, not a measured choice.
+    - cron: '0 6 * * 1-5'
+  workflow_dispatch: {}
+
+# Direct commits to master via a dedicated GitHub App (APP_ID/APP_PRIVATE_KEY secrets), not the
+# default GITHUB_TOKEN - same reasoning as drift-check.yml/cost-report.yml (see the comment at the
+# top of drift-check.yml): this repo requires all changes to master go through a PR, and the
+# default token can neither push directly nor open one itself here.
+#
+# A second, unrelated GITHUB_TOKEN wrinkle shows up in this workflow specifically: dev-status's
+# vcsClient/githubClient.ts reads its own GitHub PAT from an app env var also named GITHUB_TOKEN
+# (see src/pipeline/config/env.ts) - but the entire `GITHUB_` prefix is reserved by GitHub Actions
+# for both secrets and variables (not just the literal name `GITHUB_TOKEN`; discovered when
+# `GITHUB_REPO` as a repo variable was rejected with "Variable name cannot start with 'GITHUB_'
+# prefix" - the same restriction applies to `GITHUB_TOKEN` as a secret). Resolved by storing both
+# under differently-prefixed names - the PAT as secret DEV_STATUS_GITHUB_PAT, the repo slug as
+# variable DEV_STATUS_GITHUB_REPO - and mapping each to the app's expected env var name inside the
+# dev-status step's own `env:` block below, rather than reusing this workflow's App installation
+# token for the PAT, which would need Pull Requests: read added to the App's installed permissions
+# (currently only Contents: read/write is granted) - a change outside this repo's code,
+# unverifiable from here.
+permissions:
+  contents: read
+
+jobs:
+  scrum-ceremony-reports:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run dev-status
+        env:
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          # See this file's own header comment: GITHUB_TOKEN can't be a GitHub Actions secret name
+          # (it's reserved for the auto-generated per-run token), so the real PAT lives under
+          # DEV_STATUS_GITHUB_PAT and is mapped to the app's expected env var name here.
+          GITHUB_TOKEN: ${{ secrets.DEV_STATUS_GITHUB_PAT }}
+          GITHUB_REPO: ${{ vars.DEV_STATUS_GITHUB_REPO }}
+        run: npm run dev:status
+
+      - name: Run sprint-status
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+        run: npm run sprint:status
+
+      - name: Run standup-digest
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          # DM delivery (scrum.json's standupDigest.dm) - see standupDigest.ts's own header
+          # comment for the DM-only/channel-deferred delivery scope.
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+        run: npm run standup:digest
+
+      - name: Upload ceremony reports
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: scrum-ceremony-reports
+          # data/default/, not a repo-root path - none of these three stages take --tenant/
+          # TENANT_ID here, so resolveTenantId() falls back to 'default' (tenantContext.ts), same
+          # as every other CI guardrail/report in this repo that omits --tenant.
+          path: |
+            data/default/devStatus/report.json
+            data/default/devStatus/report.md
+            data/default/sprintStatus/report.json
+            data/default/sprintStatus/report.md
+            data/default/standupDigest/report.json
+            data/default/standupDigest/report.md
+
+      - name: Commit updated reports
+        if: always()
+        run: |
+          git config user.name "qa-pipeline-bot[bot]"
+          git config user.email "qa-pipeline-bot[bot]@users.noreply.github.com"
+          git add data/default/devStatus/report.json data/default/devStatus/report.md \
+                  data/default/sprintStatus/report.json data/default/sprintStatus/report.md \
+                  data/default/standupDigest/report.json data/default/standupDigest/report.md
+          if git diff --cached --quiet; then
+            echo "No report changes to commit"
+          else
+            git commit -m "chore: update scrum ceremony reports [skip ci]"
+            # actions/checkout always leaves HEAD detached regardless of token/trigger type, so
+            # push explicitly to the triggering branch rather than a plain `git push`.
+            git push origin HEAD:${{ github.ref_name }}
+          fi

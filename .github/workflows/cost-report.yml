@@ -1,0 +1,85 @@
+name: Cost & Latency Report
+
+on:
+  schedule:
+    # Weekly, not daily like drift-check/pipeline-report - cost is a trend-over-time concern
+    # (buildCostReport's own week-over-week comparison), not something that needs a same-day
+    # heartbeat. Monday morning, after the weekend, so the digest lands at the start of the work
+    # week.
+    - cron: '0 7 * * 1'
+  workflow_dispatch: {}
+
+# Direct commits to master via a dedicated GitHub App (APP_ID/APP_PRIVATE_KEY secrets), not the
+# default GITHUB_TOKEN - same reasoning as drift-check.yml/pipeline-report.yml (see the comment at
+# the top of drift-check.yml): this repo requires all changes to master go through a PR, and the
+# default token can neither push directly nor open one itself here.
+permissions:
+  contents: read
+
+jobs:
+  cost-report:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run cost report
+        env:
+          # Aggregates whatever cost/telemetry.jsonl already has committed - this workflow does not
+          # (and cannot) generate new telemetry itself; that only comes from a real local Claude
+          # Code session run through scripts/run-with-cost-telemetry.sh + --stage cost-record (see
+          # README's Cost & Latency Accounting section). This is a recurring digest of the
+          # already-recorded data, the same relationship pipeline-report.yml has to the other
+          # domains' report files.
+          #
+          # Own webhook/channel, deliberately separate from SLACK_WEBHOOK_URL/
+          # DRIFT_CHECK_SLACK_WEBHOOK_URL - see COST_REPORT_SLACK_WEBHOOK_URL's comment in
+          # src/pipeline/config/env.ts and .env.example.
+          COST_REPORT_SLACK_WEBHOOK_URL: ${{ secrets.COST_REPORT_SLACK_WEBHOOK_URL }}
+        run: npm run cost:report
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: cost-report
+          # data/default/, not repo-root cost/ - this job runs npm run cost:report with no
+          # --tenant/TENANT_ID, so resolveTenantId() falls back to 'default' (tenantContext.ts),
+          # same as every other CI guardrail here that omits --tenant. REPORT_JSON_PATH()/
+          # REPORT_MD_PATH() (costReport.ts) write through tenantDataPath(), which has written
+          # here since the Phase -1 tenant migration (commit 282a952) moved output out of the
+          # repo-root cost/ this step used to reference - that root path has not existed since,
+          # which silently broke the commit step below on every run since that migration.
+          path: |
+            data/default/cost/report.json
+            data/default/cost/report.md
+
+      - name: Commit updated report
+        run: |
+          git config user.name "qa-pipeline-bot[bot]"
+          git config user.email "qa-pipeline-bot[bot]@users.noreply.github.com"
+          git add data/default/cost/report.json data/default/cost/report.md
+          if git diff --cached --quiet; then
+            echo "No report changes to commit"
+          else
+            git commit -m "chore: update cost report [skip ci]"
+            # actions/checkout always leaves HEAD detached regardless of token/trigger type, so
+            # push explicitly to the triggering branch rather than a plain `git push`.
+            git push origin HEAD:${{ github.ref_name }}
+          fi

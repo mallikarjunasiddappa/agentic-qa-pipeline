@@ -1,0 +1,42 @@
+#!/bin/sh
+# Auto-stamp the Traceability-Stage trailer on commits that change the traceability manifest, so the
+# Manifest Provenance guardrail never blocks a routine "recorded a new test" PR.
+#
+# Installed per-clone by scripts/setup-merge-drivers.{sh,ps1} via: git config core.hooksPath scripts/hooks
+# The stage name is dropped into .git/TRACEABILITY_LAST_STAGE by the pipeline whenever it runs a
+# manifest-mutating stage (see src/pipeline/traceability/manifestStageMarker.ts).
+
+msg_file="$1"
+source="$2"
+
+# Leave merges and squashes alone - their manifest change comes from the merge driver, and the guard
+# only needs ONE explained commit in the PR, which the real stage commit already provides.
+case "$source" in
+  merge|squash) exit 0 ;;
+esac
+
+# Only act when this commit actually stages a traceability manifest.
+if ! git diff --cached --name-only 2>/dev/null | grep -Eq '(^|/)data/.*/traceability/manifest\.json$'; then
+  exit 0
+fi
+
+# Already explained (a real stage commit, or a deliberate hand-edit)? Do nothing.
+if grep -Eq '^[[:blank:]]*Traceability-(Stage|Manual):' "$msg_file"; then
+  exit 0
+fi
+
+git_dir=$(git rev-parse --git-dir 2>/dev/null) || exit 0
+marker="$git_dir/TRACEABILITY_LAST_STAGE"
+
+if [ -s "$marker" ]; then
+  stage=$(tr -d '\r\n' < "$marker")
+  printf '\nTraceability-Stage: %s\n' "$stage" >> "$msg_file"
+  rm -f "$marker"
+  echo "manifest-provenance: auto-stamped 'Traceability-Stage: $stage'." >&2
+else
+  echo "manifest-provenance: manifest.json is staged but no recent pipeline stage was recorded." >&2
+  echo "  Add one line to your commit message yourself:" >&2
+  echo "    Traceability-Stage: <stage>   (if a pipeline stage produced it)" >&2
+  echo "    Traceability-Manual: <reason> (if it was a reviewed hand-edit)" >&2
+fi
+exit 0

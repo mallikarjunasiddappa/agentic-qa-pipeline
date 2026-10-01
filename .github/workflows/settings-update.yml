@@ -1,0 +1,110 @@
+name: Scrum Settings Update
+
+# Dashboard v1, PR 2: the provisional Settings panel. Deliberately a workflow_dispatch GitHub
+# Actions form, not a hosted web app - the review meeting that was meant to settle the real
+# framework/hosting decision (a hosted web UI, most likely) has been postponed indefinitely, so
+# this is the lowest-commitment option that unblocks admin config edits now without becoming real
+# lock-in if that meeting eventually picks a different direction. Nothing here is meant to be
+# polished beyond "correct and safe."
+#
+# Auth: none built here on purpose. GitHub's own repo-permission model (must have at least write
+# access to this repo to trigger a workflow_dispatch run at all) is the v1 access gate - see this
+# PR's own write-up for why that may make the originally-planned separate auth-layer PR (PR 3)
+# redundant.
+#
+# Validation: the "Update setting" step below calls --stage settings-update (orchestrator/
+# pipeline.ts), which re-validates the WHOLE resulting scrum.json against the exact same
+# ScrumConfigSchema every pipeline stage already trusts (scrumConfigStore.ts's
+# applyScrumSettingUpdate()) before writing anything to disk. An invalid setting name or value
+# throws there, which fails this step (and the job) loudly in the run log - the commit step below
+# has no `if: always()`, so it is skipped entirely when the update step fails, meaning a rejected
+# value is never committed, not even partially.
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: Tenant to update (config/tenants/<tenant_id>/scrum.json)
+        type: choice
+        required: true
+        # GitHub Actions choice inputs are a fixed list at workflow-definition time - there is no
+        # way to populate this dynamically from config/tenants/ at dispatch time. Keep this list in
+        # sync by hand whenever a new tenant is provisioned. A stale/missing entry here just means
+        # a new tenant temporarily can't be picked from this dropdown yet, not a validation gap -
+        # the underlying --stage settings-update would still behave correctly (via
+        # loadScrumConfig()'s own tenantId cross-check) if invoked for it directly.
+        options:
+          - admin
+          - default
+      setting:
+        description: Setting to change
+        type: choice
+        required: true
+        # Mirrors SCRUM_SETTING_KEYS (scrumConfigStore.ts) exactly - the two concrete examples
+        # already named in the Technical Document. Keep both lists in sync by hand when a new
+        # field is added there.
+        options:
+          - blockerEscalation.idleDaysThreshold
+          - storyPointsField
+      value:
+        description: New value
+        type: string
+        required: true
+
+# Direct commits to master via a dedicated GitHub App (APP_ID/APP_PRIVATE_KEY secrets), not the
+# default GITHUB_TOKEN - same reasoning and same App as drift-check.yml/cost-report.yml: this repo
+# requires all changes to master go through a PR, and the default token can neither push directly
+# nor open a PR itself here. The App is listed in the ruleset's bypass list instead, and is used
+# for exactly this narrow purpose (Contents: read/write) across every bot-committed workflow in
+# this repo - same bot identity, same audit trail, nothing new introduced by this PR.
+permissions:
+  contents: read
+
+jobs:
+  settings-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      # No secrets/env needed here beyond the checkout token above - loading, validating, and
+      # writing scrum.json is pure filesystem + Zod, with no Jira/GitHub/Slack API calls (unlike
+      # almost every other stage in this pipeline).
+      - name: Update setting
+        run: >
+          npm run pipeline --
+          --stage settings-update
+          --tenant ${{ inputs.tenant_id }}
+          --setting "${{ inputs.setting }}"
+          --value "${{ inputs.value }}"
+
+      - name: Commit updated scrum.json
+        run: |
+          git config user.name "qa-pipeline-bot[bot]"
+          git config user.email "qa-pipeline-bot[bot]@users.noreply.github.com"
+          git add config/tenants/${{ inputs.tenant_id }}/scrum.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit (value already matched)"
+          else
+            git commit -m "chore(settings): set ${{ inputs.setting }}=${{ inputs.value }} for tenant ${{ inputs.tenant_id }} [skip ci]"
+            # actions/checkout always leaves HEAD detached regardless of token/trigger type, so
+            # push explicitly to the triggering branch rather than a plain `git push` - same fix
+            # drift-check.yml's own commit step already applies.
+            git push origin HEAD:${{ github.ref_name }}
+          fi

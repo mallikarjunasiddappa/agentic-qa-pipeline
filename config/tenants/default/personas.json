@@ -1,0 +1,43 @@
+{
+  "tenantId": "default",
+  "configVersion": 1,
+  "personas": [
+    {
+      "id": "browsing-student",
+      "displayName": "Browsing student exploring with no fixed goal",
+      "goals": [
+        "see what test types, papers and packages are available",
+        "get a feel for the site without committing to anything"
+      ],
+      "context": "Desktop browser, low commitment, easily distracted, no purchase intent",
+      "habits": [
+        "wanders between sections",
+        "clicks whatever looks interesting",
+        "backtracks often",
+        "gives up on anything that takes more than a couple of clicks"
+      ],
+      "blindSpots": ["ignores secondary navigation", "does not read fine print"],
+      "outOfBounds": ["no payment submit", "no account deletion", "no admin areas", "no profile edits"],
+      "stepBudget": 40,
+      "timeBoxMinutes": 10
+    },
+    {
+      "id": "hurried-parent-renewal",
+      "displayName": "Hurried parent renewing a test-prep package",
+      "goals": [
+        "renew my child's package before it expires",
+        "reach the checkout as fast as possible"
+      ],
+      "context": "Desktop browser, low patience, skims labels, expects Amazon-like flows",
+      "habits": [
+        "clicks the first plausible button",
+        "abandons a step that is unclear",
+        "does not scroll below the fold"
+      ],
+      "blindSpots": ["ignores fine print", "misses secondary navigation"],
+      "outOfBounds": ["no payment submit (stop at the gateway)", "no account deletion", "no admin areas", "no profile edits"],
+      "stepBudget": 40,
+      "timeBoxMinutes": 10
+    }
+  ]
+}

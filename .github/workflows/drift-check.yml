@@ -1,0 +1,95 @@
+name: Traceability Drift Check
+
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch: {}
+
+# Direct commits to master via a dedicated GitHub App (APP_ID/APP_PRIVATE_KEY secrets), not the
+# default GITHUB_TOKEN. This repo requires all changes to master go through a PR; the default
+# token can neither push directly nor open a PR itself here ("Allow GitHub Actions to create and
+# approve pull requests" is locked at the org level, outside repo-admin control). The App is
+# listed in the ruleset's bypass list instead, which sidesteps both problems - it's not asking
+# Actions to open a PR at all, it's a distinct, narrowly-scoped identity (Contents: read/write
+# only) explicitly allowed to push straight to master.
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run drift check
+        env:
+          JIRA_BASE_URL: ${{ secrets.JIRA_BASE_URL }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          QASE_API_TOKEN: ${{ secrets.QASE_API_TOKEN }}
+          QASE_PROJECT_CODE: ${{ secrets.QASE_PROJECT_CODE }}
+          # A separate secret/channel from pipeline-report.yml's SLACK_WEBHOOK_URL, deliberately -
+          # drift alerts and the general health heartbeat go to different Slack channels.
+          DRIFT_CHECK_SLACK_WEBHOOK_URL: ${{ secrets.DRIFT_CHECK_SLACK_WEBHOOK_URL }}
+          # Same repo variable pipeline-report.yml uses - the Slack message here links to the
+          # self-hosted traceability/report.html on that same Pages site (see the comment above
+          # postDriftCheckToSlack's call site in stageDriftCheck, orchestrator/pipeline.ts, for
+          # why that page can be briefly stale immediately after this workflow runs).
+          PIPELINE_REPORT_PUBLIC_URL: ${{ vars.PIPELINE_REPORT_PUBLIC_URL }}
+        run: npm run drift:check
+
+      - name: Upload drift report and manifest
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: traceability-report
+          # data/default/, not repo-root traceability/ - this job runs npm run drift:check with
+          # no --tenant/TENANT_ID, so resolveTenantId() falls back to 'default'
+          # (tenantContext.ts), same as every other CI guardrail here that omits --tenant.
+          # MANIFEST_PATH() (manifestStore.ts) and REPORT_JSON_PATH()/REPORT_MD_PATH()
+          # (traceability/report.ts) write through tenantDataPath(), which has written here
+          # since the Phase -1 tenant migration (commit 282a952) moved output out of the
+          # repo-root traceability/ this step used to reference - that root path has not existed
+          # since, which silently broke the commit step below on every daily run since that
+          # migration. Highest-impact instance of this class of bug: because the commit never
+          # landed, every day's freshly regenerated manifest.json was discarded at the end of the
+          # run, and the NEXT day's drift-check started over from the same stale, pre-migration
+          # committed manifest each time rather than building on the prior run's real state.
+          path: |
+            data/default/traceability/manifest.json
+            data/default/traceability/report.json
+            data/default/traceability/report.md
+
+      - name: Commit updated manifest and report
+        if: always()
+        run: |
+          git config user.name "qa-pipeline-bot[bot]"
+          git config user.email "qa-pipeline-bot[bot]@users.noreply.github.com"
+          git add data/default/traceability/manifest.json data/default/traceability/report.json data/default/traceability/report.md
+          if git diff --cached --quiet; then
+            echo "No manifest/report changes to commit"
+          else
+            git commit -m "chore: update traceability manifest and report [skip ci]"
+            # actions/checkout always leaves HEAD detached regardless of token/trigger type, so
+            # push explicitly to the triggering branch rather than a plain `git push`.
+            git push origin HEAD:${{ github.ref_name }}
+          fi

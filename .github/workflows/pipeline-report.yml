@@ -1,0 +1,145 @@
+name: Pipeline Health Report
+
+on:
+  schedule:
+    # 15 minutes after drift-check.yml's daily 6am run, so the traceability snapshot this report
+    # reads (see readTraceabilitySummary in pipelineReport.ts) is same-day fresh, not yesterday's.
+    - cron: '15 6 * * *'
+  workflow_dispatch: {}
+
+# contents:write is for the App-authenticated commit step below, not the default GITHUB_TOKEN -
+# see the comment at the top of drift-check.yml for why a dedicated GitHub App (APP_ID/
+# APP_PRIVATE_KEY secrets, bypass-listed on the ruleset) is used instead of committing/PR-ing with
+# the default token. pages:write/id-token:write are unrelated - those are for the Pages deploy,
+# which always uses the default token via OIDC regardless of how the commit step authenticates.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Standard GitHub Pages deployment guard: avoids two overlapping runs fighting over the same
+# Pages deployment. Doesn't cancel an in-flight deploy, just queues the next one behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  pipeline-report:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ secrets.APP_ID }}
+          private-key: ${{ secrets.APP_PRIVATE_KEY }}
+
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run pipeline report
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # A repo Actions *variable* (Settings > Secrets and variables > Actions > Variables),
+          # not computed here - this repo's Pages site is private, which GitHub serves from a
+          # randomized subdomain (https://<random-words>.pages.github.io) rather than the
+          # predictable https://<org>.github.io/<repo> pattern a public site would use. That
+          # random subdomain is stable across deployments once assigned (only changes if the
+          # Pages site itself is disabled and recreated), so it's set once as a variable rather
+          # than guessed here - see the Pipeline Health Report section in README.md for how to
+          # find/set it. Doesn't depend on this run's later "Deploy to GitHub Pages" step output,
+          # so the Slack message posted here already links correctly. This same value also drives
+          # where report.html's "Full X report" sub-links point (see deriveSiteRoot in
+          # pipelineReport.ts) - both behaviors come from this one variable, nothing else to keep
+          # in sync with it.
+          PIPELINE_REPORT_PUBLIC_URL: ${{ vars.PIPELINE_REPORT_PUBLIC_URL }}
+        run: npm run pipeline:report
+
+      - name: Upload report artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: pipeline-health-report
+          # data/default/, not repo-root pipelineReport//cost//etc. - this job runs npm run
+          # pipeline:report with no --tenant/TENANT_ID, so resolveTenantId() falls back to
+          # 'default' (tenantContext.ts), same as every other CI guardrail here that omits
+          # --tenant. Every one of these REPORT_JSON_PATH()/REPORT_HTML_PATH() functions
+          # (pipelineReport.ts, costReport.ts, healingReport.ts, flakyReport.ts, traceability/
+          # report.ts, promptVersions/report.ts) writes through tenantDataPath(), which has
+          # written under data/default/ since the Phase -1 tenant migration (commit 282a952)
+          # moved output out of these repo-root paths - none of them have existed since, which
+          # silently broke this job's "Commit updated report" step (no if: always(), so every
+          # step after it - Stage/Setup/Upload Pages, Deploy to GitHub Pages - has been skipped
+          # on every run since that migration).
+          # The five domain report.html files are still best-effort (writeSubReportPages skips
+          # any domain whose report.md doesn't exist yet) - upload-artifact's default
+          # if-no-files-found: warn means a missing one here is just a log line, not a failure.
+          path: |
+            data/default/pipelineReport/report.json
+            data/default/pipelineReport/report.html
+            data/default/cost/report.html
+            data/default/healing/report.html
+            data/default/flaky/report.html
+            data/default/traceability/report.html
+            data/default/promptVersions/report.html
+
+      - name: Commit updated report
+        run: |
+          git config user.name "qa-pipeline-bot[bot]"
+          git config user.email "qa-pipeline-bot[bot]@users.noreply.github.com"
+          git add data/default/pipelineReport/report.json data/default/pipelineReport/report.html
+          # Same best-effort reasoning as the artifact upload above - only add whichever of these
+          # actually got (re)generated this run.
+          for f in data/default/cost/report.html data/default/healing/report.html data/default/flaky/report.html data/default/traceability/report.html data/default/promptVersions/report.html; do
+            [ -f "$f" ] && git add "$f"
+          done
+          if git diff --cached --quiet; then
+            echo "No report changes to commit"
+          else
+            git commit -m "chore: update pipeline health report [skip ci]"
+            # actions/checkout always leaves HEAD detached regardless of token/trigger type, so
+            # push explicitly to the triggering branch rather than a plain `git push`.
+            git push origin HEAD:${{ github.ref_name }}
+          fi
+
+      - name: Stage Pages content
+        # upload-pages-artifact only accepts one directory as the site root, but the dashboard
+        # (pipelineReport/) and the five domain reports (cost/, healing/, etc.) are separate
+        # top-level folders under data/default/ - stage them into one combined tree first,
+        # matching the URL structure buildReportHtml's linkTo() and writeSubReportPages'
+        # "../report.html" back link both assume: report.html at the site root, each domain as a
+        # same-named subfolder (the Pages site itself has no data/default/ prefix - that's purely
+        # this repo's own tenant-scoped storage layout, not part of the published URL structure).
+        run: |
+          mkdir -p pages-dist
+          cp data/default/pipelineReport/report.html data/default/pipelineReport/report.json pages-dist/
+          for d in cost healing flaky traceability promptVersions; do
+            if [ -f "data/default/$d/report.html" ]; then
+              mkdir -p "pages-dist/$d"
+              cp "data/default/$d/report.html" "pages-dist/$d/"
+            fi
+          done
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: pages-dist
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

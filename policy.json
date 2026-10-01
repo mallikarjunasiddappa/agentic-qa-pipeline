@@ -1,0 +1,13 @@
+{
+  "policyVersion": 1,
+  "forbiddenPlaywrightPatterns": ["page.pause()", "page.waitForTimeout(", "waitForSelector("],
+  "requiredTestTags": ["smoke", "regression", "critical"],
+  "forbiddenCommittedFilenames": [
+    ".env",
+    ".env.local",
+    ".env.production",
+    "storage-state.json",
+    "credentials.json",
+    "id_rsa"
+  ]
+}

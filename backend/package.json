@@ -1,0 +1,33 @@
+{
+  "name": "agentic-qa-pipeline-backend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Phase 2 multi-tenant backend (Production Roadmap Section 6) - separate deployable service from the CLI pipeline in ../src/pipeline. Self-contained package.json/tsconfig, same quarantine reasoning as ../apps/<name>/ (Phase 0's genericity proof) - a different deployable artifact than the CLI, so it doesn't share the CLI's dependency tree or build config.",
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:validate": "prisma validate",
+    "prisma:studio": "prisma studio",
+    "db:up": "docker compose up -d",
+    "db:down": "docker compose down",
+    "migrate:tenant": "node scripts/migrate-tenant.mjs",
+    "migrate:verify": "node scripts/verify-migration.mjs",
+    "verify:queue-schema": "node scripts/verify-queue-schema.mjs",
+    "enqueue:from-pipeline": "node scripts/enqueue-from-pipeline-output.mjs",
+    "verify:enqueue-from-pipeline": "node scripts/verify-enqueue-from-pipeline-output.mjs",
+    "verify:jira-client": "node scripts/verify-jira-client.mjs",
+    "dev": "node src/server.mjs",
+    "test:unit": "node --test src/app.test.mjs src/views/queueDashboard.test.mjs scripts/lib/buildQueueProducerRows.test.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "^0.5.7",
+    "prisma": "^6.11.0",
+    "typescript": "^5.6.0"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.11.0",
+    "axios": "^1.19.0",
+    "express": "^4.21.0",
+    "pg": "^8.13.0"
+  }
+}

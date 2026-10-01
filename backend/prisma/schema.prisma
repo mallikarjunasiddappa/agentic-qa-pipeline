@@ -1,0 +1,339 @@
+// Phase 2 multi-tenant backend schema - Production Roadmap Section 6 ("Move traceability/cost/
+// healing/flaky state off flat JSON files onto a real service + database, scoped by org/team/
+// project... SSO-ready identity so approval-gate actions tie to a real authenticated human").
+//
+// Every table below (except Organization/Team/Project/User/AuditLogEntry, which are new for
+// Phase 2) is grounded field-for-field in the real, existing zod schemas in
+// src/pipeline/types/schemas.ts - not invented from scratch. Field comments cross-reference the
+// original schema so a discrepancy is easy to spot during review.
+//
+// Standard PostgreSQL, no provider-specific extensions - works identically against local Docker
+// Postgres (see ../docker-compose.yml) or any hosted Postgres later (just a DATABASE_URL change).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// --- Org/team/project scoping (new for Phase 2 - today's CLI only has a flat tenantId) ---
+
+model Organization {
+  id        String   @id @default(uuid())
+  name      String
+  // Carries today's flat tenantId forward as the migration key - see backend/README.md's
+  // "migrating from data/<tenantId>/" section. Unique so an existing tenant maps to exactly one
+  // Organization, never duplicated across re-runs of a migration script.
+  legacyTenantId String? @unique
+  createdAt DateTime @default(now())
+
+  teams    Team[]
+  projects Project[]
+  users    User[]
+  auditLog AuditLogEntry[]
+}
+
+model Team {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  name           String
+  createdAt      DateTime     @default(now())
+
+  projects Project[]
+
+  @@unique([organizationId, name])
+}
+
+// Roughly what a Jira project / repo represents today - the real scoping unit every state table
+// below hangs off. teamId is nullable: an org with no team structure yet (the common case at
+// Phase 2 launch - today's single-tenant setups have no team concept) still gets a Project without
+// forcing a placeholder Team into existence.
+model Project {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  teamId         String?
+  team           Team?        @relation(fields: [teamId], references: [id])
+  name           String
+  jiraProjectKey String?
+  createdAt      DateTime     @default(now())
+
+  workflowRecords      WorkflowRecord[]
+  traceabilityEntries  TraceabilityEntry[]
+  healingEvents        HealingEvent[]
+  flakyEvents          FlakyEvent[]
+  quarantineEntries    QuarantineEntry[]
+  costEvents           CostEvent[]
+  queueItems           QueueItem[]
+
+  @@unique([organizationId, name])
+}
+
+// A real authenticated human, linked to the SSO identity provider (Azure AD B2C) via ssoSubject -
+// the whole point of Phase 2's identity work: gate actions below reference userId, a real foreign
+// key, not a free-text "operator" string the way resolveOperator()/PIPELINE_OPERATOR does today.
+model User {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  email          String
+  displayName    String?
+  // The SSO provider's stable unique identifier for this user (Azure AD B2C's `oid` claim) - not
+  // email, since email can change; this is what a real auth token actually proves control of.
+  ssoSubject     String       @unique
+  createdAt      DateTime     @default(now())
+
+  requirementsCleared WorkflowRecord[] @relation("RequirementsClearedBy")
+  scenariosApproved   WorkflowRecord[] @relation("ScenariosApprovedBy")
+  testCasesApproved   WorkflowRecord[] @relation("TestCasesApprovedBy")
+  auditLogEntries     AuditLogEntry[]
+  resolvedQueueItems  QueueItem[]      @relation("QueueItemResolvedBy")
+
+  @@unique([organizationId, email])
+}
+
+// --- State tables - one per src/pipeline/types/schemas.ts source schema ---
+
+enum SyncState {
+  IN_SYNC
+  CASE_DRIFTED
+  TEST_DRIFTED
+  BOTH_DRIFTED
+  ORPHANED_CASE
+  ORPHANED_TEST
+}
+
+enum HealingOutcome {
+  healed
+  escalated
+  passed_no_heal_needed
+}
+
+enum FailureCategory {
+  locator_drift
+  ui_restructure
+  copy_change
+  real_regression
+  environment_issue
+}
+
+enum FlakyAction {
+  quarantined
+  cleared
+}
+
+// Mirrors WorkflowRecordSchema (schemas.ts) - the three human-approval gates per Jira ticket. The
+// three *ClearedBy/*ApprovedBy string fields (resolveOperator() output today) become real userId
+// foreign keys - the actual "governance control an auditor will accept" change Section 6 calls for.
+model WorkflowRecord {
+  id        String   @id @default(uuid())
+  projectId String
+  project   Project  @relation(fields: [projectId], references: [id])
+  jiraKey   String
+
+  // requirementGaps: RequirementGapSchema[] - stored as-is, never queried field-by-field in the
+  // existing code (only ever read/written as a whole list), so Json is the right shape here, not
+  // a normalized child table.
+  requirementGapsCheckedAt DateTime?
+  requirementGaps          Json?
+
+  requirementsClearedAt     DateTime?
+  requirementsClearedByUser User?     @relation("RequirementsClearedBy", fields: [requirementsClearedByUserId], references: [id])
+  requirementsClearedByUserId String?
+
+  scenariosApprovedAt     DateTime?
+  scenariosApprovedByUser User?     @relation("ScenariosApprovedBy", fields: [scenariosApprovedByUserId], references: [id])
+  scenariosApprovedByUserId String?
+
+  testCasesApprovedAt     DateTime?
+  testCasesApprovedByUser User?     @relation("TestCasesApprovedBy", fields: [testCasesApprovedByUserId], references: [id])
+  testCasesApprovedByUserId String?
+
+  @@unique([projectId, jiraKey])
+}
+
+// Mirrors TraceabilityEntrySchema field-for-field.
+model TraceabilityEntry {
+  id                   String    @id @default(uuid())
+  projectId            String
+  project              Project   @relation(fields: [projectId], references: [id])
+  jiraKey              String
+  externalCaseId       String
+  externalCaseHash     String
+  externalCaseUpdatedAt String
+  tmsProvider          String
+  testFilePath         String
+  // Disambiguates a multi-test file (resolveTestBlock) - nullable, same optionality as the
+  // source schema's testTitle: unambiguous (and omittable) for a file with exactly one test.
+  testTitle            String?
+  testContentHash      String
+  testLastModified     String
+  syncState            SyncState
+  lastCheckedAt        DateTime
+
+  // A case/test pair is unique per project - same real-world identity constraint the flat
+  // manifest.json's entries array has today (one entry per jiraKey+externalCaseId+testFilePath
+  // combination), just enforced by the database now instead of by convention.
+  @@unique([projectId, jiraKey, externalCaseId, testFilePath, testTitle])
+}
+
+// Mirrors HealingEventSchema. Append-only (matches healing/telemetry.jsonl's real append-only
+// convention) - never updated after insert, only ever queried/aggregated (healingReport.ts's
+// week+suite rollups become real SQL GROUP BY queries against this table).
+model HealingEvent {
+  id             String            @id @default(uuid())
+  projectId      String
+  project        Project           @relation(fields: [projectId], references: [id])
+  timestamp      DateTime
+  jiraKey        String?
+  externalCaseId String?
+  testFilePath   String
+  testTitle      String?
+  suite          String
+  attemptNumber  Int
+  outcome        HealingOutcome
+  // Required when outcome is healed/escalated, absent for passed_no_heal_needed - same refine()
+  // constraint as HealingEventSchema, enforced at the application layer (Prisma/Postgres has no
+  // direct equivalent to zod's cross-field .refine() without a CHECK constraint - see
+  // backend/README.md's "constraints not expressed in the schema" note).
+  category       FailureCategory?
+  durationMs     Int?
+
+  @@index([projectId, suite, timestamp])
+}
+
+// Mirrors FlakyEventSchema. Append-only, same reasoning as HealingEvent above.
+model FlakyEvent {
+  id             String      @id @default(uuid())
+  projectId      String
+  project        Project     @relation(fields: [projectId], references: [id])
+  timestamp      DateTime
+  jiraKey        String?
+  externalCaseId String?
+  testFilePath   String
+  testTitle      String?
+  suite          String
+  // FlakyEvidenceEntry[] ({attempt, result, timestamp}) - same "always read/written as one unit,
+  // never queried per-element" reasoning as WorkflowRecord.requirementGaps above.
+  evidence       Json
+  action         FlakyAction
+
+  @@index([projectId, testFilePath, timestamp])
+}
+
+// Mirrors QuarantineEntrySchema - CURRENT STATE (which tests are quarantined right now), distinct
+// from FlakyEvent's append-only history of quarantine/clear decisions - same split the existing
+// flaky/quarantine.json (current state) vs. flaky/telemetry.jsonl (history) files already have.
+model QuarantineEntry {
+  id             String   @id @default(uuid())
+  projectId      String
+  project        Project  @relation(fields: [projectId], references: [id])
+  testFilePath   String
+  testTitle      String?
+  jiraKey        String?
+  externalCaseId String?
+  suite          String
+  quarantinedAt  DateTime
+  evidence       Json
+
+  @@unique([projectId, testFilePath, testTitle])
+}
+
+// Mirrors CostEventSchema field-for-field.
+model CostEvent {
+  id                  String   @id @default(uuid())
+  projectId           String
+  project             Project  @relation(fields: [projectId], references: [id])
+  timestamp           DateTime
+  agent               String
+  model               String
+  inputTokens         Int
+  outputTokens        Int
+  cacheReadTokens     Int
+  cacheCreationTokens Int
+  costUsd             Decimal  @db.Decimal(12, 6)
+  wallClockMs         Int
+  jiraKey             String?
+
+  @@index([projectId, agent, timestamp])
+}
+
+// New for Phase 2 - Section 6's "with an audit trail" deliverable. One row per gate action (and,
+// over time, other governance-relevant actions) - who (real userId), what, on which entity, when.
+// Deliberately generic (entityType/entityId, not a foreign key per entity type) so this one table
+// covers WorkflowRecord gate transitions today and whatever else needs an audit trail later,
+// without a schema migration each time - the same reasoning traceability/manifest.json's
+// WorkflowRecord already uses a flexible shape for gate tracking.
+model AuditLogEntry {
+  id             String       @id @default(uuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id])
+  userId         String?
+  user           User?        @relation(fields: [userId], references: [id])
+  action         String
+  entityType     String
+  entityId       String
+  metadata       Json?
+  timestamp      DateTime     @default(now())
+
+  @@index([organizationId, entityType, entityId, timestamp])
+}
+
+// --- Phase A of "AI-Assisted Scrum and SDLC Console - Development Plan" (docs/planning/) ---
+//
+// The real prerequisite the dev plan identifies: every "new" judgment-generating stage (Stories,
+// Sprint plan, Test cases, Defects, Release) needs somewhere for an AI-drafted action to land for
+// human review - that place doesn't exist yet. This table is that place. Reuses the Organization/
+// Project/User/AuditLogEntry infrastructure already built this session rather than standing up a
+// parallel flat-file store, per the dev plan's Phase A note.
+
+// The three interaction states from the source deck (slide 7) and the dev plan's Section 3:
+// SUGGESTED - proposes an action, sits for review (brand new pattern, zero precedent elsewhere in
+// this codebase before Phase A). ESCALATED - matches blocker-scan's existing Slack/email notify
+// pattern. NEEDS_SESSION - matches groom-check/retro's existing live-judgment pattern.
+enum QueueItemType {
+  SUGGESTED
+  ESCALATED
+  NEEDS_SESSION
+}
+
+enum QueueItemState {
+  PENDING
+  RESOLVED
+  DISMISSED
+}
+
+model QueueItem {
+  id        String        @id @default(uuid())
+  projectId String
+  project   Project       @relation(fields: [projectId], references: [id])
+  type      QueueItemType
+
+  // Free text, not an enum - matches the source deck's 9 stage names (stories, sprint-plan,
+  // test-cases, defects, release, ...) today, but the dev plan's Phase B/C add stages over time and
+  // a new stage name should never require a schema migration.
+  sourceStage String
+
+  // The AI-drafted proposal itself (e.g. a draft story + AC, a suggested capacity-balanced sprint
+  // plan, a candidate defect payload for JiraClient.createBug()) - shape varies per sourceStage,
+  // same "read/written as one unit, never queried field-by-field" reasoning as
+  // WorkflowRecord.requirementGaps above.
+  payload Json
+
+  state     QueueItemState @default(PENDING)
+  createdAt DateTime       @default(now())
+
+  resolvedAt       DateTime?
+  resolvedByUser   User?     @relation("QueueItemResolvedBy", fields: [resolvedByUserId], references: [id])
+  resolvedByUserId String?
+  // Free text describing what the human actually did (e.g. "approved_as_is", "edited_and_approved",
+  // "rejected") - descriptive audit-trail metadata, not queried on, so not an enum; the specific
+  // vocabulary varies per sourceStage the same way actionTaken semantics vary per gate today.
+  actionTaken String?
+
+  @@index([projectId, state, type])
+}

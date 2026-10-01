@@ -1,0 +1,16 @@
+{
+  "tenantId": "default",
+  "configVersion": 1,
+  "boardIds": ["1"],
+  "storyPointsField": "customfield_10016",
+  "standupDigest": {
+    "dm": true
+  },
+  "vcs": {
+    "provider": "github",
+    "branchKeyConvention": "lowercase ticket key anywhere in branch name"
+  },
+  "blockerEscalation": {
+    "relatedRecipients": []
+  }
+}

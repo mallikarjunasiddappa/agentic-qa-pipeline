@@ -1,0 +1,23 @@
+# Normalize line endings to LF for everyone, regardless of OS or editor.
+# This stops files from showing as "modified" in `git status` purely because a tool on Windows
+# saved with CRLF while an earlier commit had LF (or vice versa) - see the "line-ending churn"
+# note in scenarios_prompts/full-pipeline-end-to-end-test-plan-v2.md's Phase 0 for why this exists.
+* text=auto eol=lf
+
+# Binary files - don't attempt any line-ending conversion on these.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.woff binary
+*.woff2 binary
+*.xlsx binary
+*.webm binary
+
+# --- Traceability & telemetry: stop the recurring manifest / JSONL merge conflicts ---
+# manifest.json is a shared JSON array that every branch appends to (traceability-record /
+# traceability-link) and drift-check rewrites in place. Merge it by ENTRY IDENTITY, not by line.
+# Requires a one-time-per-clone setup: run scripts/setup-merge-drivers.(ps1|sh).
+data/**/traceability/manifest.json merge=manifest-merge
+# Append-only telemetry logs (cost / flaky / healing / markers): keep both sides' lines.
+data/**/*.jsonl merge=union
